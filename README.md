@@ -436,3 +436,612 @@ Below are the variables and outputs for the RDS instance WordPress configuration
 
   - Create an EFS file system.
 
+        provider "aws" {
+          region = var.aws_region
+        }
+        
+        resource "aws_efs_file_system" "efs" {
+          creation_token = "my-efs"
+          performance_mode = var.performance_mode
+          throughput_mode  = var.throughput_mode
+          encrypted        = true
+          tags = {
+            Name = "MyEFS"
+          }
+        }
+        
+        resource "aws_efs_mount_target" "mount" {
+          count          = length(var.subnet_ids)
+          file_system_id = aws_efs_file_system.efs.id
+          subnet_id      = var.subnet_ids[count.index]
+          security_groups = [var.security_group_id]
+        }
+
+<ins>Variable.tf and Output.tf</ins>
+
+      variable "aws_region" {
+        description = "AWS region"
+        default     = "us-east-1"
+      }
+      
+      variable "performance_mode" {
+        description = "The performance mode of the EFS file system"
+        default     = "generalPurpose"
+      }
+      
+      variable "throughput_mode" {
+        description = "The throughput mode for the file system"
+        default     = "bursting"
+      }
+      
+      variable "subnet_ids" {
+        description = "List of subnet IDs for EFS mount targets"
+        type        = list(string)
+      }
+      
+      variable "security_group_id" {
+        description = "Security group ID for EFS"
+      }
+      
+      output "efs_id" {
+        description = "The ID of the EFS file system"
+        value       = aws_efs_file_system.efs.id
+      }
+      
+      output "efs_dns_name" {
+        description = "The DNS name of the EFS file system"
+        value       = aws_efs_file_system.efs.dns_name
+      }
+
+  - Mount the EFS file system on WordPress instances.
+
+            provider "aws" {
+              region = var.aws_region
+            }
+            
+            resource "aws_instance" "wordpress" {
+              ami           = var.ami_id
+              instance_type = var.instance_type
+              subnet_id     = var.subnet_id
+              security_groups = [var.security_group_id]
+              key_name      = var.key_pair
+            
+              user_data = <<-EOF
+                          #!/bin/bash
+                          yum update -y
+                          amazon-linux-extras enable php8.0
+                          yum install -y httpd php php-mysqlnd amazon-efs-utils
+                          systemctl start httpd
+                          systemctl enable httpd
+            
+                          mkdir -p /var/www/html
+                          mount -t efs -o tls ${var.efs_id}:/ /var/www/html
+                          echo "${var.efs_id}:/ /var/www/html efs defaults,_netdev 0 0" >> /etc/fstab
+            
+                          cd /var/www/html
+                          wget https://wordpress.org/latest.tar.gz
+                          tar -xzf latest.tar.gz
+                          cp -r wordpress/* .
+                          rm -rf wordpress latest.tar.gz
+            
+                          cat <<EOT > wp-config.php
+                          <?php
+                          define('DB_NAME', '${var.db_name}');
+                          define('DB_USER', '${var.db_username}');
+                          define('DB_PASSWORD', '${var.db_password}');
+                          define('DB_HOST', '${var.db_host}');
+                          define('DB_CHARSET', 'utf8');
+                          define('DB_COLLATE', '');
+                          
+                          $table_prefix = 'wp_';
+                          define('WP_DEBUG', false);
+                          
+                          if ( !defined('ABSPATH') ) {
+                            define('ABSPATH', dirname(__FILE__) . '/');
+                          }
+                          require_once(ABSPATH . 'wp-settings.php');
+                          ?>
+                          EOT
+            
+                          chown -R apache:apache /var/www/html
+                          chmod -R 755 /var/www/html
+                          systemctl restart httpd
+                          EOF
+            
+              tags = {
+                Name = "WordPress-Instance"
+              }
+            }
+
+<ins>Variables.tf & Outputs.tf</ins>
+
+        variable "aws_region" {
+          description = "AWS region"
+          default     = "us-east-1"
+        }
+        
+        variable "ami_id" {
+          description = "AMI ID for the WordPress instance"
+          default     = "ami-0c55b159cbfafe1f0"
+        }
+        
+        variable "instance_type" {
+          description = "EC2 instance type"
+          default     = "t2.micro"
+        }
+        
+        variable "subnet_id" {
+          description = "Subnet ID for the WordPress instance"
+        }
+        
+        variable "security_group_id" {
+          description = "Security group ID for the WordPress instance"
+        }
+        
+        variable "key_pair" {
+          description = "Key pair name for SSH access"
+        }
+        
+        variable "db_name" {
+          description = "Database name"
+        }
+        
+        variable "db_username" {
+          description = "Database username"
+        }
+        
+        variable "db_password" {
+          description = "Database password"
+          sensitive   = true
+        }
+        
+        variable "db_host" {
+          description = "Database host (RDS endpoint)"
+        }
+        
+        variable "efs_id" {
+          description = "EFS file system ID"
+        }
+        
+        output "wordpress_public_ip" {
+          description = "Public IP of the WordPress instance"
+          value       = aws_instance.wordpress.public_ip
+        }
+
+  - Configure WordPress to use the shared file system.
+
+              provider "aws" {
+                region = var.aws_region
+              }
+              
+              resource "aws_instance" "wordpress" {
+                ami           = var.ami_id
+                instance_type = var.instance_type
+                subnet_id     = var.subnet_id
+                security_groups = [var.security_group_id]
+                key_name      = var.key_pair
+              
+                user_data = <<-EOF
+                            #!/bin/bash
+                            yum update -y
+                            amazon-linux-extras enable php8.0
+                            yum install -y httpd php php-mysqlnd amazon-efs-utils
+                            systemctl start httpd
+                            systemctl enable httpd
+              
+                            mkdir -p /var/www/html
+                            mount -t efs -o tls ${var.efs_id}:/ /var/www/html
+                            echo "${var.efs_id}:/ /var/www/html efs defaults,_netdev 0 0" >> /etc/fstab
+              
+                            cd /var/www/html
+                            if [ ! -f wp-config.php ]; then
+                              wget https://wordpress.org/latest.tar.gz
+                              tar -xzf latest.tar.gz
+                              cp -r wordpress/* .
+                              rm -rf wordpress latest.tar.gz
+                            fi
+              
+                            cat <<EOT > wp-config.php
+                            <?php
+                            define('DB_NAME', '${var.db_name}');
+                            define('DB_USER', '${var.db_username}');
+                            define('DB_PASSWORD', '${var.db_password}');
+                            define('DB_HOST', '${var.db_host}');
+                            define('DB_CHARSET', 'utf8');
+                            define('DB_COLLATE', '');
+                            
+                            $table_prefix = 'wp_';
+                            define('WP_DEBUG', false);
+                            
+                            if ( !defined('ABSPATH') ) {
+                              define('ABSPATH', dirname(__FILE__) . '/');
+                            }
+                            require_once(ABSPATH . 'wp-settings.php');
+                            ?>
+                            EOT
+              
+                            chown -R apache:apache /var/www/html
+                            chmod -R 755 /var/www/html
+                            systemctl restart httpd
+                            EOF
+              
+                tags = {
+                  Name = "WordPress-Instance"
+                }
+              }
+
+<ins>Variables.tf & Outputs.tf</ins>
+
+        variable "aws_region" {
+          description = "AWS region"
+          default     = "us-east-1"
+        }
+        
+        variable "ami_id" {
+          description = "AMI ID for the WordPress instance"
+          default     = "ami-0c55b159cbfafe1f0"
+        }
+        
+        variable "instance_type" {
+          description = "EC2 instance type"
+          default     = "t2.micro"
+        }
+        
+        variable "subnet_id" {
+          description = "Subnet ID for the WordPress instance"
+        }
+        
+        variable "security_group_id" {
+          description = "Security group ID for the WordPress instance"
+        }
+        
+        variable "key_pair" {
+          description = "Key pair name for SSH access"
+        }
+        
+        variable "db_name" {
+          description = "Database name"
+        }
+        
+        variable "db_username" {
+          description = "Database username"
+        }
+        
+        variable "db_password" {
+          description = "Database password"
+          sensitive   = true
+        }
+        
+        variable "db_host" {
+          description = "Database host (RDS endpoint)"
+        }
+        
+        variable "efs_id" {
+          description = "EFS file system ID"
+        }
+        
+        output "wordpress_public_ip" {
+          description = "Public IP of the WordPress instance"
+          value       = aws_instance.wordpress.public_ip
+        }
+
+### 5.<ins>Application Load Balancer</ins>
+
+<ins>Objective:</ins> Set up an Application Load Balancer to distribute incoming traffic among multiple instances, ensuring high availability and fault tolerance.
+
+<ins>Steps:</ins>
+
+  - Create an Application Load Balancer.
+
+            provider "aws" {
+              region = var.aws_region
+            }
+            
+            resource "aws_lb" "app_alb" {
+              name               = "app-load-balancer"
+              internal           = false
+              load_balancer_type = "application"
+              security_groups    = [var.alb_security_group_id]
+              subnets            = var.subnet_ids
+            
+              enable_deletion_protection = false
+            
+              tags = {
+                Name = "App-ALB"
+              }
+            }
+            
+            resource "aws_lb_target_group" "app_tg" {
+              name     = "app-target-group"
+              port     = 80
+              protocol = "HTTP"
+              vpc_id   = var.vpc_id
+            
+              health_check {
+                path                = "/"
+                interval            = 30
+                timeout             = 5
+                healthy_threshold   = 2
+                unhealthy_threshold = 2
+              }
+            }
+            
+            resource "aws_lb_listener" "http" {
+              load_balancer_arn = aws_lb.app_alb.arn
+              port              = 80
+              protocol          = "HTTP"
+            
+              default_action {
+                type             = "forward"
+                target_group_arn = aws_lb_target_group.app_tg.arn
+              }
+            }
+
+<ins>Variables.tf & Output.tf</ins>
+
+      variable "aws_region" {
+        description = "AWS region"
+        default     = "us-east-1"
+      }
+      
+      variable "alb_security_group_id" {
+        description = "Security group ID for the ALB"
+      }
+      
+      variable "subnet_ids" {
+        description = "List of subnet IDs for the ALB"
+        type        = list(string)
+      }
+      
+      variable "vpc_id" {
+        description = "VPC ID"
+      }
+      
+      output "alb_dns_name" {
+        description = "DNS name of the ALB"
+        value       = aws_lb.app_alb.dns_name
+      }
+
+  - Configure listener rules for routing traffic to instances.
+
+        resource "aws_lb_listener" "http" {
+          load_balancer_arn = aws_lb.app_alb.arn
+          port              = 80
+          protocol          = "HTTP"
+        
+          default_action {
+            type             = "forward"
+            target_group_arn = aws_lb_target_group.app_tg.arn
+          }
+        }
+        
+        resource "aws_lb_listener_rule" "path_based_routing" {
+          listener_arn = aws_lb_listener.http.arn
+          priority     = 100
+        
+          conditions {
+            field  = "path-pattern"
+            values = ["/api/*"]
+          }
+        
+          actions {
+            type             = "forward"
+            target_group_arn = aws_lb_target_group.app_tg.arn
+          }
+        }
+
+  - Integrate Load Balancer with Auto Scaling group.
+
+        resource "aws_launch_template" "app_lt" {
+          name_prefix   = "app-launch-template"
+          image_id      = var.ami_id
+          instance_type = var.instance_type
+          key_name      = var.key_pair
+          vpc_security_group_ids = [var.instance_security_group_id]
+        
+          tag_specifications {
+            resource_type = "instance"
+            tags = {
+              Name = "App-Instance"
+            }
+          }
+        }
+        
+        resource "aws_autoscaling_group" "app_asg" {
+          vpc_zone_identifier  = var.subnet_ids
+          desired_capacity     = var.desired_capacity
+          min_size            = var.min_size
+          max_size            = var.max_size
+        
+          launch_template {
+            id      = aws_launch_template.app_lt.id
+            version = "$Latest"
+          }
+        
+          target_group_arns = [aws_lb_target_group.app_tg.arn]
+        }
+
+### 6.<ins>Auto Scaling Group</ins>
+
+<ins>Objective:</ins> Implement Auto Sclaing Group to automatically adjust the number of instances based on traffic load.
+
+<ins>Steps:</ins>
+
+  - Create an Auto Sclaing Group.
+
+        provider "aws" {
+          region = var.aws_region
+        }
+        
+        resource "aws_launch_template" "app_lt" {
+          name_prefix   = "app-launch-template"
+          image_id      = var.ami_id
+          instance_type = var.instance_type
+          key_name      = var.key_pair
+          vpc_security_group_ids = [var.instance_security_group_id]
+        
+          tag_specifications {
+            resource_type = "instance"
+            tags = {
+              Name = "App-Instance"
+            }
+          }
+        }
+        
+        resource "aws_autoscaling_group" "app_asg" {
+          vpc_zone_identifier  = var.subnet_ids
+          desired_capacity     = var.desired_capacity
+          min_size             = var.min_size
+          max_size             = var.max_size
+        
+          launch_template {
+            id      = aws_launch_template.app_lt.id
+            version = "$Latest"
+          }
+        }
+
+<ins>Variables.tf & Outputs.tf</ins>
+
+      variable "aws_region" {
+        description = "AWS region"
+        default     = "us-east-1"
+      }
+      
+      variable "subnet_ids" {
+        description = "List of subnet IDs for the ASG"
+        type        = list(string)
+      }
+      
+      variable "ami_id" {
+        description = "AMI ID for EC2 instances"
+      }
+      
+      variable "instance_type" {
+        description = "Instance type for EC2 instances"
+      }
+      
+      variable "key_pair" {
+        description = "Key pair name for SSH access"
+      }
+      
+      variable "instance_security_group_id" {
+        description = "Security group ID for EC2 instances"
+      }
+      
+      variable "desired_capacity" {
+        description = "Desired number of instances in the ASG"
+      }
+      
+      variable "min_size" {
+        description = "Minimum number of instances in the ASG"
+      }
+      
+      variable "max_size" {
+        description = "Maximum number of instances in the ASG"
+      }
+
+  - Define scaling policies based on metrics like CPU utilization.
+
+          provider "aws" {
+            region = var.aws_region
+          }
+          
+          resource "aws_autoscaling_policy" "scale_out" {
+            name                   = "scale-out-policy"
+            autoscaling_group_name = aws_autoscaling_group.app_asg.name
+            adjustment_type        = "ChangeInCapacity"
+            scaling_adjustment     = 1
+            cooldown               = 60
+          }
+          
+          resource "aws_autoscaling_policy" "scale_in" {
+            name                   = "scale-in-policy"
+            autoscaling_group_name = aws_autoscaling_group.app_asg.name
+            adjustment_type        = "ChangeInCapacity"
+            scaling_adjustment     = -1
+            cooldown               = 60
+          }
+          
+          resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+            alarm_name          = "high-cpu-utilization"
+            comparison_operator = "GreaterThanOrEqualToThreshold"
+            evaluation_periods  = 2
+            metric_name         = "CPUUtilization"
+            namespace          = "AWS/EC2"
+            period             = 60
+            statistic          = "Average"
+            threshold          = 70
+            actions_enabled    = true
+            alarm_actions      = [aws_autoscaling_policy.scale_out.arn]
+          
+            dimensions = {
+              AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+            }
+          }
+          
+          resource "aws_cloudwatch_metric_alarm" "cpu_low" {
+            alarm_name          = "low-cpu-utilization"
+            comparison_operator = "LessThanOrEqualToThreshold"
+            evaluation_periods  = 2
+            metric_name         = "CPUUtilization"
+            namespace          = "AWS/EC2"
+            period             = 60
+            statistic          = "Average"
+            threshold          = 30
+            actions_enabled    = true
+            alarm_actions      = [aws_autoscaling_policy.scale_in.arn]
+          
+            dimensions = {
+              AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+            }
+          }
+
+<ins>Variables.tf</ins>
+
+      variable "aws_region" {
+        description = "AWS region"
+        default     = "us-east-1"
+      }
+
+  - Configure launch configurations for instances.
+
+        provider "aws" {
+          region = var.aws_region
+        }
+        
+        resource "aws_launch_configuration" "app_lc" {
+          name          = "app-launch-configuration"
+          image_id      = var.ami_id
+          instance_type = var.instance_type
+          key_name      = var.key_pair
+          security_groups = [var.security_group_id]
+        
+          lifecycle {
+            create_before_destroy = true
+          }
+        }
+
+<ins>Variables.tf</ins>
+
+      variable "aws_region" {
+        description = "AWS region"
+        default     = "us-east-1"
+      }
+      
+      variable "ami_id" {
+        description = "AMI ID for EC2 instances"
+      }
+      
+      variable "instance_type" {
+        description = "Instance type for EC2 instances"
+      }
+      
+      variable "key_pair" {
+        description = "Key pair name for SSH access"
+      }
+      
+      variable "security_group_id" {
+        description = "Security group ID for EC2 instances"
+      }
+
+**END**
